@@ -1,36 +1,29 @@
 package main
 
 import (
+	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"net/smtp"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"notification-service/internal/consumer"
+	"notification-service/internal/handler"
 	"notification-service/internal/repository"
+	"notification-service/internal/sender"
+	"notification-service/internal/service"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
-	"github.com/jordan-wright/email"
 	_ "github.com/lib/pq"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 )
-
-// Определяем структуру, в которую будем распаковывать JSON из Kafka
-type PurchaseInfo struct {
-	UserID         string `json:"user_id"`
-	UserEmail      string `json:"user_email"`
-	CoinsPurchased int    `json:"coins_purchased"`
-	TransactionID  string `json:"transaction_id"`
-	// ... остальные поля можно опустить, если они не нужны для email
-}
 
 func main() {
 	// 1. Настройка логгера
@@ -72,123 +65,78 @@ func main() {
 	}
 	defer db.Close()
 
+	if err := db.Ping(); err != nil {
+		log.WithError(err).Fatal("Could not ping the database")
+	}
+	log.Info("Successfully connected to the PostgreSQL database")
+
 	emailRepository := repository.NewPostgresEmailRepository(db)
 
+	// 3. Создание Email Sender
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPort := os.Getenv("SMTP_PORT")
+	smtpUser := os.Getenv("SMTP_USER")
+	smtpPass := os.Getenv("SMTP_PASSWORD")
+	mailFrom := os.Getenv("MAIL_FROM")
+
+	if smtpHost == "" || smtpPort == "" || smtpUser == "" || smtpPass == "" || mailFrom == "" {
+		log.Fatal("SMTP environment variables are not set")
+	}
+
+	emailSender := sender.NewSMTPEmailSender(smtpHost, smtpPort, smtpUser, smtpPass, mailFrom)
+
+	// 4. Создание Notification Service
+	notificationService := service.NewNotificationService(emailSender, emailRepository)
+
+	// 5. Создание Handler
+	purchaseHandler := handler.NewPurchaseHandler(notificationService)
+
+	// 6. Настройка Kafka Consumer
 	kafkaServers := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
 	if kafkaServers == "" {
 		log.Fatal("KAFKA_BOOTSTRAP_SERVERS is not set")
 	}
-	// Убираем кавычки, если они есть
 	kafkaServers = strings.Trim(kafkaServers, "\"")
 	log.WithField("kafka_servers", kafkaServers).Info("Connecting to Kafka")
 
-	// 3. Создание и настройка "Потребителя" (Consumer)
 	configMap := &kafka.ConfigMap{
 		"bootstrap.servers": kafkaServers,
 		"group.id":          "notification_service_group",
 		"auto.offset.reset": "earliest",
 	}
 	log.WithField("config", fmt.Sprintf("%+v", configMap)).Debug("Kafka consumer config")
-	consumer, err := kafka.NewConsumer(configMap)
+
+	kafkaConsumer, err := kafka.NewConsumer(configMap)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create Kafka consumer")
 	}
-	defer consumer.Close()
 
-	// 4. Подписываемся на нужный нам топик
 	topic := "successful_payments"
-	if err := consumer.SubscribeTopics([]string{topic}, nil); err != nil {
-		log.WithError(err).Fatal("Failed to subscribe to topic")
+	kafkaConsumerWrapper, err := consumer.NewKafkaConsumer(kafkaConsumer, topic, purchaseHandler)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create Kafka consumer wrapper")
 	}
-	log.WithField("topic", topic).Info("Subscribed to Kafka topic")
+	defer kafkaConsumerWrapper.Close()
 
-	// 5. Запускаем бесконечный цикл для чтения сообщений
-	// (Он будет работать, пока мы не остановим приложение через Ctrl+C)
+	// 7. Graceful shutdown setup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
-	run := true
-	for run {
-		select {
-		case sig := <-sigchan:
-			log.Infof("Caught signal %v: terminating", sig)
-			run = false
-		default:
-			// Ждем новое сообщение до 100 миллисекунд
-			ev := consumer.Poll(100)
-			if ev == nil {
-				continue // Сообщений нет, начинаем цикл заново
-			}
-
-			switch e := ev.(type) {
-			case *kafka.Message:
-				var purchase PurchaseInfo
-				if err := json.Unmarshal(e.Value, &purchase); err != nil {
-					log.WithError(err).Error("Failed to unmarshal purchase info")
-					continue
-				}
-
-				logCtx := log.WithFields(log.Fields{
-					"transaction_id": purchase.TransactionID,
-					"user_id":        purchase.UserID,
-				})
-				logCtx.Info("Processing purchase event for email notification")
-
-				sendAndLogEmail(emailRepository, purchase)
-
-			case kafka.Error:
-				log.WithError(e).Error("Kafka error")
-				if e.IsFatal() {
-					run = false
-				}
-			}
+	// 8. Запуск consumer в goroutine
+	go func() {
+		if err := kafkaConsumerWrapper.Start(ctx); err != nil {
+			log.WithError(err).Error("Kafka consumer stopped with error")
+			cancel()
 		}
-	}
-}
+	}()
 
-func sendAndLogEmail(repo repository.EmailRepository, purchase PurchaseInfo) {
-	host := os.Getenv("SMTP_HOST")
-	port := os.Getenv("SMTP_PORT")
-	user := os.Getenv("SMTP_USER")
-	pass := os.Getenv("SMTP_PASSWORD")
-	from := os.Getenv("MAIL_FROM")
-
-	if host == "" || port == "" || user == "" || pass == "" || from == "" {
-		log.Error("SMTP environment variables are not set. Email not sent.")
-		return
-	}
-
-	auth := smtp.PlainAuth("", user, pass, host)
-	addr := fmt.Sprintf("%s:%s", host, port)
-
-	e := email.NewEmail()
-	e.From = from
-	e.To = []string{purchase.UserEmail}
-	e.Subject = "Покупка монет успешно завершена!"
-	e.Text = []byte(fmt.Sprintf(
-		"Здравствуйте!\n\nВы успешно приобрели %d монет.\nID вашей транзакции: %s\n\nСпасибо за покупку!",
-		purchase.CoinsPurchased,
-		purchase.TransactionID,
-	))
-
-	err := e.Send(addr, auth)
-
-	logEntry := repository.EmailLog{
-		TransactionID:  purchase.TransactionID,
-		RecipientEmail: purchase.UserEmail,
-		Subject:        e.Subject,
-	}
-
-	if err != nil {
-		log.WithError(err).Error("Failed to send confirmation email via SMTP")
-		logEntry.Status = repository.StatusFailed
-		logEntry.ErrorMessage = sql.NullString{String: err.Error(), Valid: true}
-	} else {
-		log.WithField("email", purchase.UserEmail).Info("Confirmation email sent successfully via SMTP")
-		logEntry.Status = repository.StatusSent
-	}
-
-	if err := repo.SaveLog(logEntry); err != nil {
-		log.WithError(err).Error("Failed to save email log to database")
-	}
+	// 9. Ожидание сигнала для graceful shutdown
+	log.Info("Notification service started. Press Ctrl+C to stop.")
+	<-sigchan
+	log.Info("Shutting down notification service...")
+	cancel()
+	log.Info("Notification service stopped")
 }

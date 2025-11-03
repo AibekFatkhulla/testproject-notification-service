@@ -1,8 +1,12 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type EmailStatus string
@@ -21,7 +25,7 @@ type EmailLog struct {
 }
 
 type EmailRepository interface {
-	SaveLog(log EmailLog) error
+	SaveLog(ctx context.Context, log EmailLog) error
 }
 
 type PostgresEmailRepository struct {
@@ -32,13 +36,24 @@ func NewPostgresEmailRepository(db *sql.DB) *PostgresEmailRepository {
 	return &PostgresEmailRepository{db: db}
 }
 
-func (r *PostgresEmailRepository) SaveLog(l EmailLog) error {
+func (r *PostgresEmailRepository) SaveLog(ctx context.Context, l EmailLog) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	log.WithFields(log.Fields{
+		"transaction_id": l.TransactionID,
+		"recipient_email": l.RecipientEmail,
+		"subject": l.Subject,
+		"status": l.Status,
+		"error_message": l.ErrorMessage,
+	}).Info("Saving email log to database")
+
 	const query = `
         INSERT INTO email_logs (transaction_id, recipient_email, subject, status, error_message)
         VALUES ($1, $2, $3, $4, $5);
     `
 
-	if _, err := r.db.Exec(query, l.TransactionID, l.RecipientEmail, l.Subject, string(l.Status), nullStringOrNil(l.ErrorMessage)); err != nil {
+	if _, err := r.db.ExecContext(ctx, query, l.TransactionID, l.RecipientEmail, l.Subject, string(l.Status), nullStringOrNil(l.ErrorMessage)); err != nil {
 		return fmt.Errorf("failed to insert email log: %w", err)
 	}
 	return nil
