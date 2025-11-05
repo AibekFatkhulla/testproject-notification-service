@@ -26,13 +26,13 @@ import (
 )
 
 func main() {
-	// 1. Настройка логгера
+	// 1. Setup logger
 	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.DebugLevel)
 	log.Info("Starting notification service...")
 
-	// 2. Загрузка .env (ищем и локально, и на уровень выше)
+	// 2. Load .env file (check locally and one level up)
 	if err := godotenv.Load("../.env"); err != nil {
 		log.Warn("Could not load .env file.")
 	}
@@ -72,7 +72,7 @@ func main() {
 
 	emailRepository := repository.NewPostgresEmailRepository(db)
 
-	// 3. Создание Email Sender
+	// 3. Create Email Sender
 	smtpHost := os.Getenv("SMTP_HOST")
 	smtpPort := os.Getenv("SMTP_PORT")
 	smtpUser := os.Getenv("SMTP_USER")
@@ -85,13 +85,13 @@ func main() {
 
 	emailSender := sender.NewSMTPEmailSender(smtpHost, smtpPort, smtpUser, smtpPass, mailFrom)
 
-	// 4. Создание Notification Service
+	// 4. Create Notification Service
 	notificationService := service.NewNotificationService(emailSender, emailRepository)
 
-	// 5. Создание Handler
+	// 5. Create Handler
 	purchaseHandler := handler.NewPurchaseHandler(notificationService)
 
-	// 6. Настройка Kafka Consumer
+	// 6. Setup Kafka Consumer
 	kafkaServers := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
 	if kafkaServers == "" {
 		log.Fatal("KAFKA_BOOTSTRAP_SERVERS is not set")
@@ -125,7 +125,7 @@ func main() {
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
-	// 8. Запуск consumer в goroutine
+	// 8. Start consumer in goroutine
 	go func() {
 		if err := kafkaConsumerWrapper.Start(ctx); err != nil {
 			log.WithError(err).Error("Kafka consumer stopped with error")
@@ -133,7 +133,7 @@ func main() {
 		}
 	}()
 
-	// 9. Ожидание сигнала для graceful shutdown
+	// 9. Wait for signal for graceful shutdown
 	log.Info("Notification service started. Press Ctrl+C to stop.")
 	<-sigchan
 	log.Info("Shutting down notification service...")
