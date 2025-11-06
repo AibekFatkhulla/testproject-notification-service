@@ -1,5 +1,7 @@
 package domain
 
+import "database/sql"
+
 type PurchaseInfo struct {
 	TransactionID string `json:"transaction_id"`
 	UserID        string `json:"user_id"`
@@ -8,4 +10,19 @@ type PurchaseInfo struct {
 	Provider       string `json:"provider"`
 	Country        string `json:"country"`
 	Funnel         string `json:"funnel"`
+}
+
+type EmailStatus string
+
+const (
+	StatusSent   EmailStatus = "sent"
+	StatusFailed EmailStatus = "failed"
+)
+
+type EmailLog struct {
+	TransactionID  string
+	RecipientEmail string
+	Subject        string
+	Status         EmailStatus
+	ErrorMessage   sql.NullString
 }

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"notification-service/internal/domain"
-	"notification-service/internal/repository"
 	"notification-service/internal/sender"
 	"notification-service/internal/validator"
 	"time"
@@ -13,20 +12,21 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type NotificationServiceInterface interface {
-	ProcessPurchase(ctx context.Context, purchase domain.PurchaseInfo) error
+// EmailRepository defines the interface for email log data access
+type EmailRepository interface {
+	SaveLog(ctx context.Context, log domain.EmailLog) error
 }
 
-type NotificationService struct {
+type notificationService struct {
 	emailSender     sender.EmailSender
-	emailRepository repository.EmailRepository
+	emailRepository EmailRepository
 }
 
-func NewNotificationService(emailSender sender.EmailSender, emailRepository repository.EmailRepository) *NotificationService {
-	return &NotificationService{emailSender: emailSender, emailRepository: emailRepository}
+func NewNotificationService(emailSender sender.EmailSender, emailRepository EmailRepository) *notificationService {
+	return &notificationService{emailSender: emailSender, emailRepository: emailRepository}
 }
 
-func (s *NotificationService) ProcessPurchase(ctx context.Context, purchase domain.PurchaseInfo) error {
+func (s *notificationService) ProcessPurchase(ctx context.Context, purchase domain.PurchaseInfo) error {
 	if err := validator.ValidatePurchaseInfo(purchase); err != nil {
 		log.WithFields(log.Fields{
 			"error":          err,
@@ -77,7 +77,7 @@ func (s *NotificationService) ProcessPurchase(ctx context.Context, purchase doma
 		}
 	}
 
-	logEntry := repository.EmailLog{
+	logEntry := domain.EmailLog{
 		TransactionID:  purchase.TransactionID,
 		RecipientEmail: purchase.UserEmail,
 		Subject:        subject,
@@ -85,11 +85,11 @@ func (s *NotificationService) ProcessPurchase(ctx context.Context, purchase doma
 
 	if err != nil {
 		log.WithError(err).Error("Failed to send confirmation email via SMTP")
-		logEntry.Status = repository.StatusFailed
+		logEntry.Status = domain.StatusFailed
 		logEntry.ErrorMessage = sql.NullString{String: err.Error(), Valid: true}
 	} else {
 		log.WithField("email", purchase.UserEmail).Info("Confirmation email sent successfully via SMTP")
-		logEntry.Status = repository.StatusSent
+		logEntry.Status = domain.StatusSent
 	}
 
 	if err := s.emailRepository.SaveLog(ctx, logEntry); err != nil {

@@ -4,39 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"notification-service/internal/domain"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
-type EmailStatus string
-
-const (
-	StatusSent   EmailStatus = "sent"
-	StatusFailed EmailStatus = "failed"
-)
-
-type EmailLog struct {
-	TransactionID  string
-	RecipientEmail string
-	Subject        string
-	Status         EmailStatus
-	ErrorMessage   sql.NullString
-}
-
-type EmailRepository interface {
-	SaveLog(ctx context.Context, log EmailLog) error
-}
-
-type PostgresEmailRepository struct {
+type postgresEmailRepository struct {
 	db *sql.DB
 }
 
-func NewPostgresEmailRepository(db *sql.DB) *PostgresEmailRepository {
-	return &PostgresEmailRepository{db: db}
+func NewPostgresEmailRepository(db *sql.DB) *postgresEmailRepository {
+	return &postgresEmailRepository{db: db}
 }
 
-func (r *PostgresEmailRepository) SaveLog(ctx context.Context, l EmailLog) error {
+func (r *postgresEmailRepository) SaveLog(ctx context.Context, l domain.EmailLog) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
