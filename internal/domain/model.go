@@ -10,6 +10,7 @@ type PurchaseInfo struct {
 	Provider       string `json:"provider"`
 	Country        string `json:"country"`
 	Funnel         string `json:"funnel"`
+	ProductID      string `json:"product_id"`
 }
 
 type EmailStatus string

@@ -7,13 +7,16 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
+	"notification-service/internal/config"
 	"notification-service/internal/consumer"
 	"notification-service/internal/handler"
 	"notification-service/internal/repository"
 	"notification-service/internal/sender"
 	"notification-service/internal/service"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -29,7 +32,20 @@ func main() {
 	// 1. Setup logger
 	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 	log.SetOutput(os.Stdout)
-	log.SetLevel(log.DebugLevel)
+
+	levelStr := os.Getenv("LOG_LEVEL")
+	if levelStr == "" {
+		levelStr = "info"
+	}
+
+	level, err := log.ParseLevel(levelStr)
+	if err != nil {
+		log.Warnf("Invalid LOG_LEVEL '%s', using InfoLevel", levelStr)
+		level = log.InfoLevel
+	}
+
+	log.SetLevel(level)
+	log.WithField("level", level.String()).Info("Logger initialized")
 	log.Info("Starting notification service...")
 
 	// 2. Load .env file (check locally and one level up)
@@ -37,10 +53,11 @@ func main() {
 		log.Warn("Could not load .env file.")
 	}
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL is not set")
+	cfg, err := config.Load()
+	if err != nil {
+		log.WithField("error", err).Fatal("Could not load configuration")
 	}
+	dbURL := cfg.DB.URL
 
 	// Use a separate migrations table to avoid conflicts with the core service migrations
 	migrationDBURL := dbURL
@@ -63,11 +80,19 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatal("Could not connect to database")
 	}
-	defer db.Close()
 
-	if err := db.Ping(); err != nil {
-		log.WithError(err).Fatal("Could not ping the database")
+	db.SetMaxOpenConns(cfg.DB.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.DB.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.DB.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.DB.ConnMaxIdleTime)
+
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		log.WithField("error", err).Fatal("Could not ping the database")
 	}
+
+	defer db.Close()
 	log.Info("Successfully connected to the PostgreSQL database")
 
 	emailRepository := repository.NewPostgresEmailRepository(db)
@@ -116,7 +141,6 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create Kafka consumer wrapper")
 	}
-	defer kafkaConsumerWrapper.Close()
 
 	// 7. Graceful shutdown setup
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,10 +150,12 @@ func main() {
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
 	// 8. Start consumer in goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := kafkaConsumerWrapper.Start(ctx); err != nil {
 			log.WithError(err).Error("Kafka consumer stopped with error")
-			cancel()
 		}
 	}()
 
@@ -137,6 +163,31 @@ func main() {
 	log.Info("Notification service started. Press Ctrl+C to stop.")
 	<-sigchan
 	log.Info("Shutting down notification service...")
+
+	// Cancel context to stop consumer
 	cancel()
+
+	// Wait for goroutine to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Info("All goroutines stopped gracefully")
+	case <-time.After(10 * time.Second):
+		log.Warn("Shutdown timeout exceeded, forcing exit")
+	}
+
+	// Close resources explicitly
+	if err := kafkaConsumerWrapper.Close(); err != nil {
+		log.WithError(err).Error("Error closing Kafka consumer")
+	}
+	if err := db.Close(); err != nil {
+		log.WithError(err).Error("Error closing database")
+	}
+
 	log.Info("Notification service stopped")
 }

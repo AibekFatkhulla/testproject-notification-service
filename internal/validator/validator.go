@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"notification-service/internal/domain"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -14,9 +16,14 @@ var (
 	ErrEmptyUserID          = errors.New("user ID is empty")
 	ErrInvalidUserID        = errors.New("user ID is invalid")
 	ErrInvalidCoins         = errors.New("coins purchased must be greater than 0")
+	ErrEmailTooLong         = errors.New("email is too long")
 )
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
+const (
+	MaxEmailLength = 255
+)
 
 func ValidateEmail(email string) error {
 	if strings.TrimSpace(email) == "" {
@@ -24,6 +31,9 @@ func ValidateEmail(email string) error {
 	}
 	if !emailRegex.MatchString(email) {
 		return ErrInvalidEmailFormat
+	}
+	if len(email) > MaxEmailLength {
+		return ErrEmailTooLong
 	}
 	return nil
 }
@@ -41,7 +51,7 @@ func ValidateUserID(userID string) error {
 	if userID == "" {
 		return ErrEmptyUserID
 	}
-	if len(userID) < 3 {
+	if _, err := uuid.Parse(userID); err != nil {
 		return ErrInvalidUserID
 	}
 	return nil

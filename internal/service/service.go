@@ -37,11 +37,21 @@ func (s *notificationService) ProcessPurchase(ctx context.Context, purchase doma
 	}
 
 	subject := "Покупка монет успешно завершена!"
-	body := fmt.Sprintf(
-		"Здравствуйте!\n\nВы успешно приобрели %d монет.\nID вашей транзакции: %s\n\nСпасибо за покупку!",
-		purchase.CoinsPurchased,
-		purchase.TransactionID,
-	)
+	var body string
+	if purchase.ProductID != "" {
+		body = fmt.Sprintf(
+			"Здравствуйте!\n\nВы успешно приобрели товар (ID: %s).\nКоличество монет: %d\nID вашей транзакции: %s\n\nСпасибо за покупку!",
+			purchase.ProductID,
+			purchase.CoinsPurchased,
+			purchase.TransactionID,
+		)
+	} else {
+		body = fmt.Sprintf(
+			"Здравствуйте!\n\nВы успешно приобрели %d монет.\nID вашей транзакции: %s\n\nСпасибо за покупку!",
+			purchase.CoinsPurchased,
+			purchase.TransactionID,
+		)
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
