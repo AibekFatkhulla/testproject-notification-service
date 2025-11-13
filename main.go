@@ -115,6 +115,7 @@ func main() {
 
 	// 5. Create Handler
 	purchaseHandler := handler.NewPurchaseHandler(notificationService)
+	refundHandler := handler.NewRefundHandler(notificationService)
 
 	// 6. Setup Kafka Consumer
 	kafkaServers := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
@@ -142,6 +143,17 @@ func main() {
 		log.WithError(err).Fatal("Failed to create Kafka consumer wrapper")
 	}
 
+	refundTopic := "refund_events"
+	refundConsumer, err := kafka.NewConsumer(configMap)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create refund Kafka consumer")
+	}
+
+	refundConsumerWrapper, err := consumer.NewKafkaConsumer(refundConsumer, refundTopic, refundHandler)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to create refund Kafka consumer wrapper")
+	}
+
 	// 7. Graceful shutdown setup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -156,6 +168,14 @@ func main() {
 		defer wg.Done()
 		if err := kafkaConsumerWrapper.Start(ctx); err != nil {
 			log.WithError(err).Error("Kafka consumer stopped with error")
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := refundConsumerWrapper.Start(ctx); err != nil {
+			log.WithError(err).Error("Refund Kafka consumer stopped with error")
 		}
 	}()
 
@@ -185,6 +205,11 @@ func main() {
 	if err := kafkaConsumerWrapper.Close(); err != nil {
 		log.WithError(err).Error("Error closing Kafka consumer")
 	}
+
+	if err := refundConsumerWrapper.Close(); err != nil {
+		log.WithError(err).Error("Error closing refund Kafka consumer")
+	}
+
 	if err := db.Close(); err != nil {
 		log.WithError(err).Error("Error closing database")
 	}

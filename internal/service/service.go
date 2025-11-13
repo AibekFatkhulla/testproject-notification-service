@@ -109,3 +109,75 @@ func (s *notificationService) ProcessPurchase(ctx context.Context, purchase doma
 
 	return nil
 }
+
+func (s *notificationService) ProcessRefund(ctx context.Context, refund domain.RefundInfo) error {
+	amountDollars := float64(refund.Amount) / 100.0
+
+	subject := "Возврат средств обработан"
+	body := fmt.Sprintf(
+		"Здравствуйте!\n\nВаш возврат средств был успешно обработан.\n\n"+
+			"Сумма возврата: $%.2f\n"+
+			"Списано монет: %d\n"+
+			"ID транзакции: %s\n"+
+			"ID возврата: %s\n\n",
+		amountDollars,
+		refund.CoinsDeducted,
+		refund.TransactionID,
+		refund.RefundID,
+	)
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// Retry sending email up to 3 times with exponential backoff
+	maxAttempts := 3
+	initialDelay := 1 * time.Second
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = s.emailSender.SendEmail(ctx, refund.UserEmail, subject, body)
+		if err == nil {
+			if attempt > 1 {
+				log.WithFields(log.Fields{
+					"attempt":      attempt,
+					"max_attempts": maxAttempts,
+					"email":        refund.UserEmail,
+				}).Info("Refund email sent successfully after retry")
+			}
+			break
+		}
+
+		if attempt < maxAttempts {
+			log.WithFields(log.Fields{
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"error":        err,
+				"email":        refund.UserEmail,
+			}).Warn("Failed to send refund email, retrying...")
+
+			time.Sleep(initialDelay)
+			initialDelay *= 2
+		}
+	}
+
+	logEntry := domain.EmailLog{
+		TransactionID:  refund.TransactionID,
+		RecipientEmail: refund.UserEmail,
+		Subject:        subject,
+	}
+
+	if err != nil {
+		log.WithError(err).Error("Failed to send refund email via SMTP")
+		logEntry.Status = domain.StatusFailed
+		logEntry.ErrorMessage = sql.NullString{String: err.Error(), Valid: true}
+	} else {
+		log.WithField("email", refund.UserEmail).Info("Refund email sent successfully via SMTP")
+		logEntry.Status = domain.StatusSent
+	}
+
+	if err := s.emailRepository.SaveLog(ctx, logEntry); err != nil {
+		log.WithError(err).Error("Failed to save refund email log to database")
+		return err
+	}
+
+	return nil
+}
